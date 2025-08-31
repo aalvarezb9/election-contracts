@@ -11,50 +11,32 @@ async function main() {
   await voting.deployed();
   console.log("Voting deployed to:", voting.address);
 
-  // Crear elección
   const title = "Elección Presidencial 2025";
-  let tx = await voting.createElection(title);
-  await tx.wait();
+  await (await voting.createElection(title)).wait();
   const eid = await voting.currentElectionId();
   console.log("Election created:", eid.toString(), title);
 
-  // Agregar candidatos
-  const candidates = ["Juan Pérez", "María López", "Carlos Sánchez"];
-  for (const name of candidates) {
-    tx = await voting.addCandidate(eid, name);
-    await tx.wait();
-    console.log("Candidate added:", name);
+  const candidates = [
+    { name: "Juan Pérez",  imageURI: "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcSID_Astp9-pWM1UZ4gcO6vbMnOzneXX0ZfWw&s" },
+    { name: "María López", imageURI: "https://www.laprensagrafica.com/__export/1750461000730/sites/prensagrafica/img/2025/06/20/gal.jpg_673822677.jpg" },
+    { name: "Carlos Sánchez", imageURI: "https://www.fcbarcelona.com/photo-resources/2021/08/05/1a696bdf-2750-4f86-9564-4422faf50151/messi-2.jpg?width=1200&height=750" }
+  ];
+  for (const c of candidates) {
+    await (await voting.addCandidate(eid, c.name, c.imageURI)).wait();
+    console.log("Candidate added:", c.name, c.imageURI);
   }
 
-  // Exportar ABI + address para relayer y frontend
   const artifact = await hre.artifacts.readArtifact("Voting");
-  const out = {
-    address: voting.address,
-    abi: artifact.abi
-  };
-
-  // 1) Para el relayer
+  const out = { address: voting.address, abi: artifact.abi, chainId: hre.network.config.chainId || 31337 };
   const relayerPath = path.join(__dirname, "..", "..", "elections-relayer", "config", "contract.json");
-  try {
-    fs.mkdirSync(path.dirname(relayerPath), { recursive: true });
-    fs.writeFileSync(relayerPath, JSON.stringify(out, null, 2));
-    console.log("Wrote:", relayerPath);
-  } catch (e) {
-    console.warn("No pude escribir en elections-relayer/config/contract.json, copia manualmente.");
-  }
+  fs.mkdirSync(path.dirname(relayerPath), { recursive: true });
+  fs.writeFileSync(relayerPath, JSON.stringify(out, null, 2));
+  console.log("Wrote:", relayerPath);
 
-  // 2) Para el frontend
   const fePath = path.join(__dirname, "..", "..", "elections-frontend", "src", "assets", "contract.json");
-  try {
-    fs.mkdirSync(path.dirname(fePath), { recursive: true });
-    fs.writeFileSync(fePath, JSON.stringify(out, null, 2));
-    console.log("Wrote:", fePath);
-  } catch (e) {
-    console.warn("No pude escribir en elections-frontend/src/assets/contract.json, copia manualmente.");
-  }
+  fs.mkdirSync(path.dirname(fePath), { recursive: true });
+  fs.writeFileSync(fePath, JSON.stringify(out, null, 2));
+  console.log("Wrote:", fePath);
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+main().catch((e) => { console.error(e); process.exit(1); });
