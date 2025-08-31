@@ -14,6 +14,15 @@ contract Voting {
         bool active;
     }
 
+    struct Vote {
+        uint256 id;
+        uint256 candidateId;
+        uint64 timestamp;
+    }
+
+    mapping(uint256 => Vote[]) private _votes;
+    mapping(uint256 => mapping(uint256 => uint256[]))
+        private _voteIdxByCandidate;
     // Elecciones registradas
     mapping(uint256 => Election) public elections;
 
@@ -30,6 +39,12 @@ contract Voting {
     uint256 public electionCount;
 
     // Eventos
+    event VoteRecorded(
+        uint256 indexed electionId,
+        uint256 indexed candidateId,
+        uint256 indexed voteId,
+        uint64 timestamp
+    );
     event ElectionCreated(uint256 indexed electionId, string title);
     event CandidateAdded(
         uint256 indexed electionId,
@@ -53,7 +68,7 @@ contract Voting {
                 "Close current election first"
             );
         }
-        
+
         electionCount++;
         currentElectionId = electionCount;
 
@@ -69,7 +84,7 @@ contract Voting {
     function closeCurrentElection() external {
         require(currentElectionId != 0, "No election");
         require(elections[currentElectionId].active, "Already closed");
-        
+
         elections[currentElectionId].active = false;
         emit ElectionClosed(currentElectionId);
     }
@@ -80,12 +95,12 @@ contract Voting {
             "Must add to current election"
         );
         require(elections[electionId].active, "Election not active");
-        
+
         uint256 cid = _candidates[electionId].length;
         _candidates[electionId].push(
             Candidate({id: cid, name: _name, voteCount: 0})
         );
-        
+
         emit CandidateAdded(electionId, cid, _name);
     }
 
@@ -124,10 +139,95 @@ contract Voting {
 
     // ===== Merkle helpers (pares ordenados; compatible con merkletreejs sortPairs:true) =====
 
+    function getVotesCount() external view returns (uint256) {
+        return _votes[currentElectionId].length;
+    }
+
+    // Total de votos en una elección específica
+    function getVotesCount(uint256 electionId) external view returns (uint256) {
+        return _votes[electionId].length;
+    }
+
+    // Lee un voto (por índice) de la elección actual
+    function getVote(uint256 index) external view returns (Vote memory) {
+        return _votes[currentElectionId][index];
+    }
+
+    // Lee un voto (por índice) de una elección dada
+    function getVote(
+        uint256 electionId,
+        uint256 index
+    ) external view returns (Vote memory) {
+        return _votes[electionId][index];
+    }
+
+    // Paginado de votos de la elección actual: [start, start+limit)
+    function getVotesRange(
+        uint256 start,
+        uint256 limit
+    ) external view returns (Vote[] memory out) {
+        Vote[] storage arr = _votes[currentElectionId];
+        uint256 n = arr.length;
+        if (start >= n) {
+            // out está “zero-initialized” => arreglo vacío
+            return out;
+        }
+        uint256 end = _min(start + limit, n);
+        out = new Vote[](end - start);
+        for (uint256 i = start; i < end; i++) {
+            out[i - start] = arr[i];
+        }
+    }
+
+    // Paginado de votos de una elección dada
+    function getVotesRange(
+        uint256 electionId,
+        uint256 start,
+        uint256 limit
+    ) external view returns (Vote[] memory out) {
+        Vote[] storage arr = _votes[electionId];
+        uint256 n = arr.length;
+        if (start >= n) {
+            return out;
+        }
+        uint256 end = _min(start + limit, n);
+        out = new Vote[](end - start);
+        for (uint256 i = start; i < end; i++) out[i - start] = arr[i];
+    }
+
+    // Conteo por candidato en una elección (además del voteCount que ya tienes)
+    function getVotesByCandidateCount(
+        uint256 electionId,
+        uint256 candidateId
+    ) external view returns (uint256) {
+        return _voteIdxByCandidate[electionId][candidateId].length;
+    }
+
+    // Paginado de votos por candidato en una elección
+    function getVotesByCandidateRange(
+        uint256 electionId,
+        uint256 candidateId,
+        uint256 start,
+        uint256 limit
+    ) external view returns (Vote[] memory out) {
+        uint256[] storage idxs = _voteIdxByCandidate[electionId][candidateId];
+        uint256 n = idxs.length;
+        if (start >= n) {
+            return out;
+        }
+        uint256 end = _min(start + limit, n);
+        out = new Vote[](end - start);
+        Vote[] storage arr = _votes[electionId];
+        for (uint256 i = start; i < end; i++) {
+            out[i - start] = arr[idxs[i]];
+        }
+    }
+
     function _hashPair(bytes32 a, bytes32 b) private pure returns (bytes32) {
-        return a <= b 
-            ? keccak256(abi.encodePacked(a, b)) 
-            : keccak256(abi.encodePacked(b, a));
+        return
+            a <= b
+                ? keccak256(abi.encodePacked(a, b))
+                : keccak256(abi.encodePacked(b, a));
     }
 
     function _verify(
@@ -160,18 +260,22 @@ contract Voting {
         require(_verify(proof, merkleRootOf[eid], leaf), "Invalid proof");
 
         _nullifierUsed[eid][nullifier] = true;
-        
+
         Candidate storage c = _candidates[eid][candidateId];
         unchecked {
             c.voteCount += 1;
         }
-        
+
+        _recordVote(eid, candidateId);
         emit VoteCast(eid, candidateId, c.voteCount);
     }
 
     // Versión antigua: si quieres, puedes mantenerla para compatibilidad temporal.
     // Recomiendo deshabilitarla en producción para no permitir saltarse la prueba Merkle.
-    function voteWithNullifier(bytes32 nullifier, uint256 candidateId) external {
+    function voteWithNullifier(
+        bytes32 nullifier,
+        uint256 candidateId
+    ) external {
         revert("Use voteWithNullifier(bytes32,uint256,bytes32[],bytes32)");
     }
 
@@ -181,12 +285,14 @@ contract Voting {
         require(eid != 0, "No election");
         require(elections[eid].active, "Election closed");
         require(candidateId < _candidates[eid].length, "Invalid candidate");
-        
+
         Candidate storage c = _candidates[eid][candidateId];
         unchecked {
             c.voteCount += 1;
         }
-        
+
+        _recordVote(eid, candidateId);
+
         emit VoteCast(eid, candidateId, c.voteCount);
     }
 
@@ -197,5 +303,22 @@ contract Voting {
 
         merkleRootOf[currentElectionId] = root;
         emit MerkleRootUpdated(currentElectionId, root);
+    }
+
+    function _min(uint256 a, uint256 b) private pure returns (uint256) {
+        return a < b ? a : b;
+    }
+
+    function _recordVote(uint256 eid, uint256 candidateId) private {
+        uint256 vid = _votes[eid].length;
+        _votes[eid].push(
+            Vote({
+                id: vid,
+                candidateId: candidateId,
+                timestamp: uint64(block.timestamp)
+            })
+        );
+        _voteIdxByCandidate[eid][candidateId].push(vid);
+        emit VoteRecorded(eid, candidateId, vid, uint64(block.timestamp));
     }
 }
